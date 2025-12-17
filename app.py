@@ -32,48 +32,77 @@ from text_html_utils import extract_text_from_html, text_to_html_paragraphs, tex
 TEXT_CORRECTION_API_URL = os.getenv('TEXT_CORRECTION_API_URL', 'http://localhost:5001/correct')
 TEXT_CORRECTION_AVAILABLE = True  # Luôn available vì dùng API
 
-def correct_vietnamese_text(text, use_correction=True, use_gpu=False):
+def correct_vietnamese_text(text, use_correction=True, use_gpu=False, max_retries=2):
     """
     Gọi API Text Correction để chỉnh sửa chính tả tiếng Việt
     API endpoint: http://localhost:5001/correct
     GỌI MỘT LẦN cho toàn bộ text (không chia nhỏ) - NHANH và CHUẨN
     GPT-4o-mini sẽ tự động giữ nguyên format xuống dòng và spacing
+    Có retry logic để đảm bảo luôn xử lý được
     """
     if not use_correction or not text or not text.strip():
         return text
     
-    try:
-        # Gọi API một lần cho toàn bộ text - NHANH và CHUẨN
-        response = requests.post(
-            TEXT_CORRECTION_API_URL,
-            json={'text': text},
-            timeout=120  # Timeout 120 giây cho text dài
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            if result.get('success'):
-                corrected_text = result.get('corrected_text', text)
-                return corrected_text
-            else:
-                # Nếu API lỗi, giữ nguyên text gốc
-                print(f"⚠️  API trả về lỗi: {result.get('error', 'Unknown error')}")
-                return text
-        else:
-            # Nếu request failed, giữ nguyên text gốc
-            print(f"⚠️  API request failed với status code: {response.status_code}")
-            return text
+    # Retry logic để đảm bảo luôn xử lý được
+    for attempt in range(max_retries + 1):
+        try:
+            # Gọi API một lần cho toàn bộ text - NHANH và CHUẨN
+            response = requests.post(
+                TEXT_CORRECTION_API_URL,
+                json={'text': text},
+                timeout=120  # Timeout 120 giây cho text dài
+            )
             
-    except requests.exceptions.ConnectionError:
-        print(f"⚠️  Không thể kết nối đến Text Correction API ({TEXT_CORRECTION_API_URL})")
-        print("💡 Đảm bảo API server đang chạy: cd ocr-protonx && python app.py")
-        return text
-    except requests.exceptions.Timeout:
-        print("⚠️  API timeout (text quá dài hoặc server chậm), giữ nguyên text gốc")
-        return text
-    except Exception as e:
-        print(f"⚠️  Lỗi khi gọi Text Correction API: {str(e)}")
-        return text
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('success'):
+                    corrected_text = result.get('corrected_text', text)
+                    if attempt > 0:
+                        print(f"✅ Text Correction thành công sau {attempt + 1} lần thử")
+                    return corrected_text
+                else:
+                    # Nếu API trả về lỗi, retry nếu chưa hết số lần
+                    error_msg = result.get('error', 'Unknown error')
+                    if attempt < max_retries:
+                        print(f"⚠️  API trả về lỗi (lần {attempt + 1}): {error_msg}, đang retry...")
+                        time.sleep(1)  # Đợi 1 giây trước khi retry
+                        continue
+                    print(f"⚠️  API trả về lỗi sau {max_retries + 1} lần thử: {error_msg}, giữ nguyên text gốc")
+                    return text
+            else:
+                # Nếu request failed, retry nếu chưa hết số lần
+                if attempt < max_retries:
+                    print(f"⚠️  API request failed với status code {response.status_code} (lần {attempt + 1}), đang retry...")
+                    time.sleep(1)
+                    continue
+                print(f"⚠️  API request failed với status code {response.status_code} sau {max_retries + 1} lần thử, giữ nguyên text gốc")
+                return text
+                
+        except requests.exceptions.ConnectionError:
+            if attempt < max_retries:
+                print(f"⚠️  Không thể kết nối đến Text Correction API ({TEXT_CORRECTION_API_URL}) - lần {attempt + 1}, đang retry...")
+                time.sleep(2)  # Đợi 2 giây trước khi retry
+                continue
+            print(f"⚠️  Không thể kết nối đến Text Correction API ({TEXT_CORRECTION_API_URL}) sau {max_retries + 1} lần thử")
+            print("💡 Đảm bảo API server đang chạy: cd ocr-protonx && python app.py")
+            return text
+        except requests.exceptions.Timeout:
+            if attempt < max_retries:
+                print(f"⚠️  API timeout (lần {attempt + 1}), đang retry...")
+                time.sleep(1)
+                continue
+            print(f"⚠️  API timeout sau {max_retries + 1} lần thử (text quá dài hoặc server chậm), giữ nguyên text gốc")
+            return text
+        except Exception as e:
+            if attempt < max_retries:
+                print(f"⚠️  Lỗi khi gọi Text Correction API (lần {attempt + 1}): {str(e)}, đang retry...")
+                time.sleep(1)
+                continue
+            print(f"⚠️  Lỗi khi gọi Text Correction API sau {max_retries + 1} lần thử: {str(e)}, giữ nguyên text gốc")
+            return text
+    
+    # Nếu đến đây thì đã hết retry, trả về text gốc
+    return text
 
 print("\n" + "="*60)
 print("📡 Text Correction: Sử dụng API")
@@ -728,10 +757,13 @@ def process_pdf(file_buffer, force_ocr=False, use_text_correction=True):
                 text = extracted['text']
                 
                 # Apply text correction qua API - sửa chính tả tiếng Việt
+                # LUÔN áp dụng text correction nếu enabled
                 corrected_text = text
-                if use_text_correction and TEXT_CORRECTION_AVAILABLE:
-                    print("Đang gọi Text Correction API để sửa chính tả tiếng Việt...")
+                if use_text_correction:
+                    print("Đang gọi Text Correction API để sửa chính tả tiếng Việt (direct extraction)...")
                     corrected_text = correct_vietnamese_text(text, use_correction=True)
+                else:
+                    print("⚠️  Text Correction đã bị tắt bởi user request")
                 
                 processing_time = time.time() - start_time
                 
@@ -756,7 +788,7 @@ def process_pdf(file_buffer, force_ocr=False, use_text_correction=True):
                     'pages': extracted['pages'],
                     'confidence': extracted['confidence'],
                     'method': 'direct_extraction',
-                    'text_correction': use_text_correction and TEXT_CORRECTION_AVAILABLE,
+                    'text_correction': use_text_correction,
                     'processing_time': f"{processing_time:.2f}s",
                     'text_length': len(plain_text),
                     'word_count': len(plain_text.split())
@@ -800,7 +832,7 @@ def process_pdf(file_buffer, force_ocr=False, use_text_correction=True):
                     page_text = result['text']
                     
                     # Gọi API ngay sau khi OCR xong từng trang để sửa chính tả
-                    if use_text_correction and TEXT_CORRECTION_AVAILABLE:
+                    if use_text_correction:
                         try:
                             print(f"  → Gọi Text Correction API để sửa chính tả tiếng Việt trang {idx + 1}...")
                             corrected_page_text = correct_vietnamese_text(page_text, use_correction=True)
@@ -810,6 +842,7 @@ def process_pdf(file_buffer, force_ocr=False, use_text_correction=True):
                             print(f"  ⚠️  Lỗi khi sửa chính tả trang {idx + 1}: {str(correction_err)}, giữ nguyên text gốc")
                             all_texts.append(f"--- Trang {idx + 1} ---\n{page_text}")
                     else:
+                        print(f"  ⚠️  Text Correction đã bị tắt, giữ nguyên text gốc trang {idx + 1}")
                         all_texts.append(f"--- Trang {idx + 1} ---\n{page_text}")
                     
                     all_confidences.append(result.get('confidence', 0.0))
@@ -864,7 +897,7 @@ def process_pdf(file_buffer, force_ocr=False, use_text_correction=True):
             'failed_pages': failed_pages if failed_pages else [],
             'confidence': avg_confidence,
             'method': 'ocr',
-            'text_correction': use_text_correction and TEXT_CORRECTION_AVAILABLE,
+            'text_correction': use_text_correction,
             'processing_time': f"{processing_time:.2f}s",
             'text_length': len(plain_text),
             'word_count': len(plain_text.split())
@@ -909,8 +942,9 @@ def process_image(file_buffer, use_text_correction=True):
         text = result['text']
         lines_with_alignment = result.get('lines_with_alignment', [])
         
-        if use_text_correction and TEXT_CORRECTION_AVAILABLE:
-            print("Đang gọi Text Correction API để sửa chính tả tiếng Việt...")
+        # LUÔN áp dụng text correction nếu enabled
+        if use_text_correction:
+            print("Đang gọi Text Correction API để sửa chính tả tiếng Việt (image OCR)...")
             text = correct_vietnamese_text(text, use_correction=True)
             # Cập nhật text trong lines_with_alignment sau khi correction
             # (giữ nguyên alignment, chỉ update text)
@@ -918,6 +952,8 @@ def process_image(file_buffer, use_text_correction=True):
             for i, line_info in enumerate(lines_with_alignment):
                 if i < len(corrected_lines):
                     line_info['text'] = corrected_lines[i]
+        else:
+            print("⚠️  Text Correction đã bị tắt, giữ nguyên text gốc")
         
         processing_time = time.time() - start_time
         
@@ -941,7 +977,7 @@ def process_image(file_buffer, use_text_correction=True):
             'html': html_content,  # HTML (có HTML tags)
             'confidence': result['confidence'],
             'method': 'ocr',
-            'text_correction': use_text_correction and TEXT_CORRECTION_AVAILABLE,
+            'text_correction': use_text_correction,
             'processing_time': f"{processing_time:.2f}s",
             'text_length': len(plain_text),
             'word_count': len(plain_text.split())
@@ -1059,7 +1095,12 @@ def extract_text():
         
         # Get options
         force_ocr = request.form.get('forceOCR', 'false').lower() == 'true'
-        use_text_correction = request.form.get('useTextCorrection', 'true').lower() == 'true'  # Default: enabled
+        # Mặc định LUÔN bật text correction (chỉ tắt nếu explicitly set false)
+        use_text_correction_str = request.form.get('useTextCorrection', 'true').lower().strip()
+        use_text_correction = use_text_correction_str != 'false'  # Default: enabled (true nếu không phải 'false')
+        
+        # Log để debug
+        print(f"📝 Text Correction: {'ENABLED' if use_text_correction else 'DISABLED'} (from request: '{use_text_correction_str}')")
         
         # Process based on detected file type (use content detection)
         if is_pdf:
