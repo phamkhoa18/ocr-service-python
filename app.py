@@ -736,9 +736,9 @@ def ocr_image(image, use_preprocessing=False):
     except Exception as e:
         raise Exception(f"Lỗi khi OCR ảnh: {str(e)}")
 
-def process_pdf(file_buffer, force_ocr=False, use_text_correction=True):
+def process_pdf(file_buffer, force_ocr=True, use_text_correction=True):
     """
-    Xử lý PDF file - thử extract text trước, nếu không được thì OCR
+    Xử lý PDF file - MẶC ĐỊNH LUÔN DÙNG OCR để đảm bảo chất lượng và nhất quán
     """
     start_time = time.time()
     
@@ -749,57 +749,8 @@ def process_pdf(file_buffer, force_ocr=False, use_text_correction=True):
     elif not isinstance(file_buffer, bytes):
         file_buffer = bytes(file_buffer)
     
-    # Thử extract text trước
-    if not force_ocr:
-        try:
-            extracted = extract_text_from_pdf(file_buffer)
-            if extracted['is_real_text'] and extracted['confidence'] >= 80:
-                text = extracted['text']
-                
-                # Apply text correction qua API - sửa chính tả tiếng Việt
-                # LUÔN áp dụng text correction nếu enabled
-                corrected_text = text
-                if use_text_correction:
-                    print("Đang gọi Text Correction API để sửa chính tả tiếng Việt (direct extraction)...")
-                    corrected_text = correct_vietnamese_text(text, use_correction=True)
-                else:
-                    print("⚠️  Text Correction đã bị tắt bởi user request")
-                
-                processing_time = time.time() - start_time
-                
-                # PHÂN TÁCH: text (text thuần) và html (HTML)
-                # Nếu corrected_text có HTML tags -> extract text thuần và giữ HTML
-                # Nếu corrected_text là text thuần -> giữ text và convert sang HTML
-                has_html_tags = '<' in corrected_text and '>' in corrected_text and re.search(r'<[^>]+>', corrected_text)
-                
-                if has_html_tags:
-                    # Text đang chứa HTML -> extract text thuần
-                    plain_text = extract_text_from_html(corrected_text)
-                    html_content = corrected_text
-                else:
-                    # Text thuần -> convert sang HTML
-                    plain_text = corrected_text
-                    html_content = text_to_html_paragraphs(corrected_text)
-                
-                result_data = {
-                    'success': True,
-                    'text': plain_text,  # Text thuần (không có HTML tags)
-                    'html': html_content,  # HTML (có HTML tags)
-                    'pages': extracted['pages'],
-                    'confidence': extracted['confidence'],
-                    'method': 'direct_extraction',
-                    'text_correction': use_text_correction,
-                    'processing_time': f"{processing_time:.2f}s",
-                    'text_length': len(plain_text),
-                    'word_count': len(plain_text.split())
-                }
-                
-                return result_data
-        except Exception as e:
-            print(f"Text extraction failed: {e}")
-    
-    # Nếu không được, OCR
-    print("PDF không có text layer tốt, đang OCR...")
+    # LUÔN DÙNG OCR - không tự động chuyển sang direct extraction
+    print("📄 Đang xử lý PDF bằng OCR...")
     
     try:
         # Convert PDF to images
@@ -1094,17 +1045,19 @@ def extract_text():
                 }), 400
         
         # Get options
-        force_ocr = request.form.get('forceOCR', 'false').lower() == 'true'
+        # Mặc định LUÔN dùng OCR (không cần force_ocr parameter nữa)
         # Mặc định LUÔN bật text correction (chỉ tắt nếu explicitly set false)
         use_text_correction_str = request.form.get('useTextCorrection', 'true').lower().strip()
         use_text_correction = use_text_correction_str != 'false'  # Default: enabled (true nếu không phải 'false')
         
         # Log để debug
         print(f"📝 Text Correction: {'ENABLED' if use_text_correction else 'DISABLED'} (from request: '{use_text_correction_str}')")
+        print(f"🔄 Method: LUÔN DÙNG OCR (nhất quán cho mọi file)")
         
         # Process based on detected file type (use content detection)
+        # LUÔN dùng OCR cho cả PDF và Image
         if is_pdf:
-            result = process_pdf(file_buffer, force_ocr=force_ocr, use_text_correction=use_text_correction)
+            result = process_pdf(file_buffer, force_ocr=True, use_text_correction=use_text_correction)
         elif is_image:
             result = process_image(file_buffer, use_text_correction=use_text_correction)
         else:
