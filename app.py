@@ -285,6 +285,7 @@ def extract_text_from_pdf(file_buffer):
 def pdf_to_images(file_buffer):
     """
     Convert PDF pages to images để OCR
+    Xử lý từng trang với error handling - nếu một trang lỗi, skip và tiếp tục
     """
     try:
         # Đảm bảo file_buffer là bytes
@@ -295,20 +296,39 @@ def pdf_to_images(file_buffer):
             file_buffer = bytes(file_buffer)
         
         doc = fitz.open(stream=file_buffer, filetype="pdf")
+        total_pages = len(doc)
         images = []
+        failed_pages = []
         
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            # Render với scale cao để OCR tốt hơn
-            mat = fitz.Matrix(2.5, 2.5)  # 2.5x scale
-            pix = page.get_pixmap(matrix=mat)
-            
-            # Convert to PIL Image
-            img_data = pix.tobytes("png")
-            img = Image.open(io.BytesIO(img_data))
-            images.append(img)
+        print(f"📄 PDF có {total_pages} trang, đang chuyển sang ảnh...")
+        
+        for page_num in range(total_pages):
+            try:
+                page = doc[page_num]
+                # Render với scale cao để OCR tốt hơn
+                mat = fitz.Matrix(2.5, 2.5)  # 2.5x scale
+                pix = page.get_pixmap(matrix=mat)
+                
+                # Convert to PIL Image
+                img_data = pix.tobytes("png")
+                img = Image.open(io.BytesIO(img_data))
+                images.append(img)
+                print(f"  ✅ Trang {page_num + 1}/{total_pages} đã chuyển sang ảnh")
+            except Exception as page_err:
+                print(f"  ⚠️  Lỗi khi chuyển trang {page_num + 1} sang ảnh: {str(page_err)}")
+                failed_pages.append(page_num + 1)
+                # Tạo ảnh trắng hoặc skip trang này
+                continue
         
         doc.close()
+        
+        if failed_pages:
+            print(f"⚠️  {len(failed_pages)} trang không thể chuyển sang ảnh: {failed_pages}")
+        
+        if not images:
+            raise Exception("Không thể chuyển bất kỳ trang nào sang ảnh")
+        
+        print(f"✅ Đã chuyển {len(images)}/{total_pages} trang sang ảnh thành công")
         return images
     except Exception as e:
         raise Exception(f"Lỗi khi chuyển PDF sang ảnh: {str(e)}")
@@ -733,26 +753,60 @@ def process_pdf(file_buffer, force_ocr=False, use_text_correction=True):
         print(f"Đã chuyển đổi {len(images)} trang sang ảnh")
         
         # OCR từng trang và gọi ProtonX sửa chính tả ngay sau mỗi trang
+        # Xử lý từng trang với error handling riêng - nếu một trang lỗi, skip và tiếp tục
         all_texts = []
         all_confidences = []
+        failed_pages = []
         
         for idx, img in enumerate(images):
-            print(f"\n[{idx + 1}/{len(images)}] Đang OCR trang {idx + 1}...")
-            result = ocr_image(img, use_preprocessing=False)  # TẮT preprocessing để không mất chữ
-            
-            if result['text']:
-                page_text = result['text']
+            try:
+                print(f"\n[{idx + 1}/{len(images)}] Đang OCR trang {idx + 1}...")
                 
-                # Gọi API ngay sau khi OCR xong từng trang để sửa chính tả
-                if use_text_correction and TEXT_CORRECTION_AVAILABLE:
-                    print(f"  → Gọi Text Correction API để sửa chính tả tiếng Việt trang {idx + 1}...")
-                    corrected_page_text = correct_vietnamese_text(page_text, use_correction=True)
-                    print(f"  ✅ Đã sửa chính tả trang {idx + 1} xong")
-                    all_texts.append(f"--- Trang {idx + 1} ---\n{corrected_page_text}")
+                # OCR trang này
+                try:
+                    result = ocr_image(img, use_preprocessing=False)  # TẮT preprocessing để không mất chữ
+                except Exception as ocr_err:
+                    print(f"  ⚠️  Lỗi khi OCR trang {idx + 1}: {str(ocr_err)}")
+                    failed_pages.append(idx + 1)
+                    all_texts.append(f"--- Trang {idx + 1} ---\n[Lỗi khi OCR trang này: {str(ocr_err)}]")
+                    all_confidences.append(0.0)
+                    continue
+                
+                if result and result.get('text'):
+                    page_text = result['text']
+                    
+                    # Gọi API ngay sau khi OCR xong từng trang để sửa chính tả
+                    if use_text_correction and TEXT_CORRECTION_AVAILABLE:
+                        try:
+                            print(f"  → Gọi Text Correction API để sửa chính tả tiếng Việt trang {idx + 1}...")
+                            corrected_page_text = correct_vietnamese_text(page_text, use_correction=True)
+                            print(f"  ✅ Đã sửa chính tả trang {idx + 1} xong")
+                            all_texts.append(f"--- Trang {idx + 1} ---\n{corrected_page_text}")
+                        except Exception as correction_err:
+                            print(f"  ⚠️  Lỗi khi sửa chính tả trang {idx + 1}: {str(correction_err)}, giữ nguyên text gốc")
+                            all_texts.append(f"--- Trang {idx + 1} ---\n{page_text}")
+                    else:
+                        all_texts.append(f"--- Trang {idx + 1} ---\n{page_text}")
+                    
+                    all_confidences.append(result.get('confidence', 0.0))
                 else:
-                    all_texts.append(f"--- Trang {idx + 1} ---\n{page_text}")
-                
-                all_confidences.append(result['confidence'])
+                    print(f"  ⚠️  Trang {idx + 1} không có text được detect")
+                    all_texts.append(f"--- Trang {idx + 1} ---\n[Không có text được phát hiện]")
+                    all_confidences.append(0.0)
+                    
+            except Exception as page_err:
+                print(f"  ❌ Lỗi khi xử lý trang {idx + 1}: {str(page_err)}")
+                failed_pages.append(idx + 1)
+                all_texts.append(f"--- Trang {idx + 1} ---\n[Lỗi: {str(page_err)}]")
+                all_confidences.append(0.0)
+                continue
+        
+        # Log kết quả
+        success_pages = len(images) - len(failed_pages)
+        print(f"\n📊 Kết quả xử lý PDF:")
+        print(f"   ✅ Thành công: {success_pages}/{len(images)} trang")
+        if failed_pages:
+            print(f"   ⚠️  Lỗi: {len(failed_pages)} trang ({', '.join(map(str, failed_pages))})")
         
         # Kết hợp tất cả các trang đã được sửa chính tả
         combined_text = "\n\n".join(all_texts)
@@ -774,11 +828,16 @@ def process_pdf(file_buffer, force_ocr=False, use_text_correction=True):
         avg_confidence = sum(all_confidences) / len(all_confidences) if all_confidences else 0
         processing_time = time.time() - start_time
         
+        # Tính số trang thành công
+        success_pages = len(images) - len(failed_pages) if failed_pages else len(images)
+        
         result = {
             'success': True,
             'text': plain_text,  # Text thuần (không có HTML tags)
             'html': html_content,  # HTML (có HTML tags)
             'pages': len(images),
+            'success_pages': success_pages,
+            'failed_pages': failed_pages if failed_pages else [],
             'confidence': avg_confidence,
             'method': 'ocr',
             'text_correction': use_text_correction and TEXT_CORRECTION_AVAILABLE,
@@ -786,6 +845,10 @@ def process_pdf(file_buffer, force_ocr=False, use_text_correction=True):
             'text_length': len(plain_text),
             'word_count': len(plain_text.split())
         }
+        
+        # Nếu có trang lỗi, vẫn trả về success nhưng có warning
+        if failed_pages:
+            result['warning'] = f"Một số trang ({len(failed_pages)} trang) không thể xử lý được"
         
         return result
     except Exception as e:
