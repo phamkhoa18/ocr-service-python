@@ -351,12 +351,28 @@ def pdf_to_images(file_buffer):
                     mat = fitz.Matrix(2.5, 2.5)  # 2.5x scale
                     pix = page.get_pixmap(matrix=mat)
                     
-                    # Convert to PIL Image
+                    # Convert to PIL Image - đảm bảo format đúng
                     img_data = pix.tobytes("png")
-                    # Copy image để tránh reference issues và đảm bảo độc lập
-                    img = Image.open(io.BytesIO(img_data)).copy()
-                    images.append(img)
-                    print(f"  ✅ Trang {page_num + 1}/{total_pages} đã chuyển sang ảnh")
+                    img_bytes = io.BytesIO(img_data)
+                    img = Image.open(img_bytes)
+                    
+                    # Đảm bảo image là RGB mode (PaddleOCR cần RGB)
+                    if img.mode != 'RGB':
+                        if img.mode == 'RGBA':
+                            # Tạo background trắng cho RGBA
+                            rgb_img = Image.new('RGB', img.size, (255, 255, 255))
+                            rgb_img.paste(img, mask=img.split()[3] if len(img.split()) >= 4 else None)
+                            img = rgb_img
+                        elif img.mode in ('L', 'P', 'LA', 'PA'):
+                            # Grayscale hoặc palette -> convert to RGB
+                            img = img.convert('RGB')
+                        else:
+                            img = img.convert('RGB')
+                    
+                    # Copy image để đảm bảo độc lập và giải phóng memory
+                    img_copy = img.copy()
+                    images.append(img_copy)
+                    print(f"  ✅ Trang {page_num + 1}/{total_pages} đã chuyển sang ảnh (mode: {img_copy.mode})")
                 except Exception as page_err:
                     print(f"  ⚠️  Lỗi khi chuyển trang {page_num + 1} sang ảnh: {str(page_err)}")
                     failed_pages.append(page_num + 1)
@@ -545,42 +561,56 @@ def ocr_image(image, use_preprocessing=False):
     ĐẢM BẢO KHÔNG MẤT CHỮ - Default: TẮT preprocessing để không làm mất text
     """
     try:
+        # Đảm bảo image là PIL Image object
+        if not isinstance(image, Image.Image):
+            raise Exception("Image must be PIL Image object")
+        
         # Preprocess NHẸ nếu cần - Default TẮT để không làm mất chữ
         if use_preprocessing:
             print("⚠️  Preprocessing enabled - có thể ảnh hưởng đến chất lượng text")
             image = preprocess_image_for_ocr(image)
         
-        # Convert PIL to numpy array for PaddleOCR
-        # Đảm bảo image là RGB mode trước
+        # Đảm bảo image là RGB mode - QUAN TRỌNG
         if image.mode != 'RGB':
             if image.mode == 'RGBA':
                 # Tạo background trắng cho RGBA
                 rgb_image = Image.new('RGB', image.size, (255, 255, 255))
-                rgb_image.paste(image, mask=image.split()[3] if image.mode == 'RGBA' else None)
+                alpha = image.split()[3] if len(image.split()) >= 4 else None
+                if alpha:
+                    rgb_image.paste(image, mask=alpha)
+                else:
+                    rgb_image.paste(image)
                 image = rgb_image
+            elif image.mode in ('L', 'P', 'LA', 'PA'):
+                # Grayscale hoặc palette -> convert to RGB
+                image = image.convert('RGB')
             else:
+                # Các mode khác -> convert to RGB
                 image = image.convert('RGB')
         
-        img_array = np.array(image)
+        # Convert PIL Image to numpy array
+        # PIL Image (RGB) -> numpy array (RGB format)
+        img_array = np.array(image, dtype=np.uint8)
         
-        # Đảm bảo img_array có format đúng
-        if len(img_array.shape) == 2:
-            # Grayscale -> convert to BGR
-            img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
-        elif len(img_array.shape) == 3:
-            # Color image - PIL là RGB, PaddleOCR cần BGR
-            if img_array.shape[2] == 4:  # RGBA (should not happen after conversion above)
-                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
-            elif img_array.shape[2] == 3:  # RGB
-                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-            else:
-                raise Exception(f"Unsupported image format: {img_array.shape}")
-        else:
-            raise Exception(f"Invalid image array shape: {img_array.shape}")
+        # Validate img_array shape
+        if len(img_array.shape) != 3 or img_array.shape[2] != 3:
+            raise Exception(f"Invalid image array shape after conversion: {img_array.shape}, expected (H, W, 3)")
         
-        # Đảm bảo img_array là uint8
+        # PaddleOCR expects BGR format (OpenCV standard)
+        # Convert RGB to BGR
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        
+        # Final validation - đảm bảo là uint8
         if img_array.dtype != np.uint8:
             img_array = img_array.astype(np.uint8)
+        
+        # Validate shape one more time
+        if len(img_array.shape) != 3 or img_array.shape[2] != 3:
+            raise Exception(f"Invalid final image array shape: {img_array.shape}")
+        
+        # Validate array is not empty
+        if img_array.size == 0:
+            raise Exception("Image array is empty")
         
         # Perform OCR - ĐẢM BẢO KHÔNG MẤT CHỮ
         result = ocr_engine.ocr(img_array, cls=True)
