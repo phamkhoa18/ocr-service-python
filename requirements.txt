@@ -1,0 +1,32 @@
+# OCR Service Python Backend - Chuyên xử lý OCR tiếng Việt
+# Core dependencies
+flask==3.0.0
+flask-cors==4.0.0
+python-dotenv==1.0.0
+Pillow==10.1.0
+
+# OCR Libraries - PaddleOCR (tốt nhất cho tiếng Việt)
+paddlepaddle==2.6.2
+paddleocr==2.7.3
+
+# PDF Processing
+PyMuPDF==1.23.14  # (fitz) - Tốt nhất để xử lý PDF
+pdf2image==1.16.3
+# Note: poppler-utils là system package, cần cài riêng (không qua pip)
+# Windows: https://github.com/oschwartz10612/poppler-windows/releases
+# Linux: sudo apt-get install poppler-utils
+# Mac: brew install poppler
+
+# Image Processing
+# Note: paddleocr 2.7.3 requires opencv-python<=4.6.0.66
+opencv-python<=4.6.0.66
+# numpy version compatible with paddleocr
+numpy>=1.19.0,<2.0.0
+
+# Text Correction - Gọi API (http://localhost:5001/correct)
+# Không cần cài transformers/torch ở đây nữa vì dùng API riêng
+requests>=2.31.0
+
+# Utilities
+Werkzeug==3.0.1
+
