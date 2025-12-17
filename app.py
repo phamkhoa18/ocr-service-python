@@ -242,6 +242,7 @@ def extract_text_from_pdf(file_buffer):
     """
     Extract text từ PDF (nếu PDF có text layer)
     """
+    doc = None
     try:
         # Đảm bảo file_buffer là bytes
         if isinstance(file_buffer, io.BytesIO):
@@ -251,15 +252,18 @@ def extract_text_from_pdf(file_buffer):
             file_buffer = bytes(file_buffer)
         
         doc = fitz.open(stream=file_buffer, filetype="pdf")
+        total_pages = len(doc)
         text_parts = []
         
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            text = page.get_text()
-            if text.strip():
-                text_parts.append(f"--- Trang {page_num + 1} ---\n{text}")
-        
-        doc.close()
+        for page_num in range(total_pages):
+            try:
+                page = doc[page_num]
+                text = page.get_text()
+                if text.strip():
+                    text_parts.append(f"--- Trang {page_num + 1} ---\n{text}")
+            except Exception as page_err:
+                print(f"  ⚠️  Lỗi khi đọc trang {page_num + 1}: {str(page_err)}")
+                continue
         
         full_text = "\n\n".join(text_parts)
         
@@ -273,7 +277,7 @@ def extract_text_from_pdf(file_buffer):
         
         return {
             'text': full_text,
-            'pages': len(doc),
+            'pages': total_pages,
             'text_length': text_length,
             'word_count': word_count,
             'is_real_text': is_real_text,
@@ -281,6 +285,13 @@ def extract_text_from_pdf(file_buffer):
         }
     except Exception as e:
         raise Exception(f"Lỗi khi đọc PDF: {str(e)}")
+    finally:
+        # Đảm bảo document được đóng
+        if doc is not None:
+            try:
+                doc.close()
+            except:
+                pass
 
 def pdf_to_images(file_buffer):
     """
@@ -302,25 +313,36 @@ def pdf_to_images(file_buffer):
         
         print(f"📄 PDF có {total_pages} trang, đang chuyển sang ảnh...")
         
-        for page_num in range(total_pages):
-            try:
-                page = doc[page_num]
-                # Render với scale cao để OCR tốt hơn
-                mat = fitz.Matrix(2.5, 2.5)  # 2.5x scale
-                pix = page.get_pixmap(matrix=mat)
-                
-                # Convert to PIL Image
-                img_data = pix.tobytes("png")
-                img = Image.open(io.BytesIO(img_data))
-                images.append(img)
-                print(f"  ✅ Trang {page_num + 1}/{total_pages} đã chuyển sang ảnh")
-            except Exception as page_err:
-                print(f"  ⚠️  Lỗi khi chuyển trang {page_num + 1} sang ảnh: {str(page_err)}")
-                failed_pages.append(page_num + 1)
-                # Tạo ảnh trắng hoặc skip trang này
-                continue
-        
-        doc.close()
+        try:
+            for page_num in range(total_pages):
+                pix = None
+                try:
+                    page = doc[page_num]
+                    # Render với scale cao để OCR tốt hơn
+                    mat = fitz.Matrix(2.5, 2.5)  # 2.5x scale
+                    pix = page.get_pixmap(matrix=mat)
+                    
+                    # Convert to PIL Image
+                    img_data = pix.tobytes("png")
+                    # Copy image để tránh reference issues và đảm bảo độc lập
+                    img = Image.open(io.BytesIO(img_data)).copy()
+                    images.append(img)
+                    print(f"  ✅ Trang {page_num + 1}/{total_pages} đã chuyển sang ảnh")
+                except Exception as page_err:
+                    print(f"  ⚠️  Lỗi khi chuyển trang {page_num + 1} sang ảnh: {str(page_err)}")
+                    failed_pages.append(page_num + 1)
+                    continue
+                finally:
+                    # Giải phóng pixmap để tránh memory leak
+                    if pix is not None:
+                        pix = None
+        finally:
+            # Đảm bảo document được đóng
+            if doc is not None:
+                try:
+                    doc.close()
+                except:
+                    pass
         
         if failed_pages:
             print(f"⚠️  {len(failed_pages)} trang không thể chuyển sang ảnh: {failed_pages}")
@@ -762,9 +784,11 @@ def process_pdf(file_buffer, force_ocr=False, use_text_correction=True):
             try:
                 print(f"\n[{idx + 1}/{len(images)}] Đang OCR trang {idx + 1}...")
                 
-                # OCR trang này
+                # OCR trang này - đảm bảo image được copy để tránh reference issues
                 try:
-                    result = ocr_image(img, use_preprocessing=False)  # TẮT preprocessing để không mất chữ
+                    # Copy image để đảm bảo độc lập
+                    img_copy = img.copy() if hasattr(img, 'copy') else img
+                    result = ocr_image(img_copy, use_preprocessing=False)  # TẮT preprocessing để không mất chữ
                 except Exception as ocr_err:
                     print(f"  ⚠️  Lỗi khi OCR trang {idx + 1}: {str(ocr_err)}")
                     failed_pages.append(idx + 1)
@@ -987,8 +1011,12 @@ def extract_text():
             }), 400
         
         # Read file to buffer first (need to check content type)
+        # Reset file pointer trước khi đọc
+        file.seek(0)
         file_buffer = file.read()
+        # Tạo BytesIO mới để đảm bảo clean state
         file_buffer_io = io.BytesIO(file_buffer)
+        file_buffer_io.seek(0)
         
         # Check file type by content, not just extension (more flexible)
         # Also check content-type header (Chrome PDF viewer might send application/pdf)
@@ -1057,11 +1085,17 @@ def extract_text():
         
     except Exception as e:
         print(f"Error in extract_text: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({
             'success': False,
             'message': f'Đã xảy ra lỗi: {str(e)}',
             'error': str(e)
         }), 500
+    finally:
+        # Cleanup - đảm bảo không có resource leak sau mỗi request
+        import gc
+        gc.collect()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 4000))  # Port 4000 cho OCR service, 5001 cho Text Correction API
