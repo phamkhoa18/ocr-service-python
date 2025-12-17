@@ -124,34 +124,71 @@ def allowed_file(filename):
 def is_pdf_file(filename, file_buffer):
     """Check if file is PDF by content, not just extension"""
     try:
-        # Check extension first
+        # Check extension first (including cases where filename might be None or empty)
+        if filename:
+            filename_lower = filename.lower()
+            if filename_lower.endswith('.pdf') or 'pdf' in filename_lower:
+                # Verify by content too
+                file_buffer.seek(0)
+                header = file_buffer.read(4)
+                file_buffer.seek(0)
+                if header.startswith(b'%PDF'):
+                    return True
+        
+        # Check magic bytes (PDF starts with %PDF) - primary check
+        file_buffer.seek(0)
+        # Read more bytes to be sure (PDF header can have whitespace)
+        header = file_buffer.read(1024)
+        file_buffer.seek(0)
+        
+        # Check for PDF magic bytes (can have whitespace before %PDF)
+        if b'%PDF' in header[:1024]:
+            return True
+            
+        # Also check for PDF in first bytes (sometimes Chrome adds data)
+        if header.startswith(b'%PDF') or header.strip().startswith(b'%PDF'):
+            return True
+            
+        return False
+    except Exception as e:
+        print(f"⚠️  Error checking PDF: {str(e)}")
+        # Fallback: if filename suggests PDF, trust it
         if filename and filename.lower().endswith('.pdf'):
             return True
-        
-        # Check magic bytes (PDF starts with %PDF)
-        file_buffer.seek(0)
-        header = file_buffer.read(4)
-        file_buffer.seek(0)
-        return header.startswith(b'%PDF')
-    except:
         return False
 
 def is_image_file(filename, file_buffer):
     """Check if file is image by trying to open with PIL"""
     try:
-        # Check extension first
+        # First try to open with PIL (works for most formats)
+        file_buffer.seek(0)
+        buffer_copy = file_buffer.read()
+        file_buffer.seek(0)
+        
+        # Try to open with PIL
+        try:
+            img = Image.open(io.BytesIO(buffer_copy))
+            img.verify()  # Verify it's a valid image
+            return True
+        except:
+            pass
+        
+        # Check extension as fallback
         if filename:
             ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
             image_exts = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'tiff', 'tif', 'jfif', 'pjpeg', 'pjp', 'ico', 'heic', 'heif'}
             if ext in image_exts:
-                # Try to open with PIL to verify
-                file_buffer.seek(0)
-                img = Image.open(io.BytesIO(file_buffer.read()))
-                img.verify()  # Verify it's a valid image
-                file_buffer.seek(0)
-                return True
+                # Try again with format hint
+                try:
+                    file_buffer.seek(0)
+                    img = Image.open(io.BytesIO(buffer_copy))
+                    img.verify()
+                    return True
+                except:
+                    pass
         return False
-    except:
+    except Exception as e:
+        print(f"⚠️  Error checking image: {str(e)}")
         return False
 
 def preprocess_image_for_ocr(image):
@@ -206,6 +243,13 @@ def extract_text_from_pdf(file_buffer):
     Extract text từ PDF (nếu PDF có text layer)
     """
     try:
+        # Đảm bảo file_buffer là bytes
+        if isinstance(file_buffer, io.BytesIO):
+            file_buffer.seek(0)
+            file_buffer = file_buffer.read()
+        elif not isinstance(file_buffer, bytes):
+            file_buffer = bytes(file_buffer)
+        
         doc = fitz.open(stream=file_buffer, filetype="pdf")
         text_parts = []
         
@@ -243,6 +287,13 @@ def pdf_to_images(file_buffer):
     Convert PDF pages to images để OCR
     """
     try:
+        # Đảm bảo file_buffer là bytes
+        if isinstance(file_buffer, io.BytesIO):
+            file_buffer.seek(0)
+            file_buffer = file_buffer.read()
+        elif not isinstance(file_buffer, bytes):
+            file_buffer = bytes(file_buffer)
+        
         doc = fitz.open(stream=file_buffer, filetype="pdf")
         images = []
         
@@ -620,6 +671,13 @@ def process_pdf(file_buffer, force_ocr=False, use_text_correction=True):
     """
     start_time = time.time()
     
+    # Đảm bảo file_buffer là bytes (handle trường hợp Chrome PDF viewer)
+    if isinstance(file_buffer, io.BytesIO):
+        file_buffer.seek(0)
+        file_buffer = file_buffer.read()
+    elif not isinstance(file_buffer, bytes):
+        file_buffer = bytes(file_buffer)
+    
     # Thử extract text trước
     if not force_ocr:
         try:
@@ -870,8 +928,35 @@ def extract_text():
         file_buffer_io = io.BytesIO(file_buffer)
         
         # Check file type by content, not just extension (more flexible)
-        is_pdf = is_pdf_file(file.filename, file_buffer_io)
-        is_image = is_image_file(file.filename, file_buffer_io) if not is_pdf else False
+        # Also check content-type header (Chrome PDF viewer might send application/pdf)
+        content_type = request.content_type or request.headers.get('Content-Type', '') or ''
+        filename_lower = (file.filename or '').lower()
+        
+        # Check if it's PDF first (by content-type, filename, or content)
+        is_pdf = False
+        # Check content-type header (Chrome PDF viewer sends application/pdf)
+        if 'application/pdf' in content_type:
+            is_pdf = True
+            print(f"✅ Detected PDF by Content-Type: {content_type}")
+        elif filename_lower.endswith('.pdf'):
+            # Check by content to verify
+            is_pdf = is_pdf_file(file.filename, file_buffer_io)
+            if is_pdf:
+                print(f"✅ Detected PDF by filename and content: {file.filename}")
+        else:
+            # Check by content only
+            is_pdf = is_pdf_file(file.filename, file_buffer_io)
+            if is_pdf:
+                print(f"✅ Detected PDF by content (no extension): {file.filename}")
+        
+        # If not PDF, check if it's image
+        is_image = False
+        if not is_pdf:
+            # Check content-type for images
+            if any(ct in content_type for ct in ['image/', 'image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/bmp', 'image/webp', 'image/tiff']):
+                is_image = is_image_file(file.filename, file_buffer_io)
+            else:
+                is_image = is_image_file(file.filename, file_buffer_io)
         
         if not is_pdf and not is_image:
             # Try extension check as fallback
