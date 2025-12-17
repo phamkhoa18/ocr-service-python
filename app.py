@@ -87,7 +87,14 @@ CORS(app)
 
 # Configuration
 UPLOAD_FOLDER = 'uploads'
-ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'tiff'}
+# Hỗ trợ nhiều format PDF và image
+ALLOWED_EXTENSIONS = {
+    # PDF formats
+    'pdf',
+    # Image formats
+    'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'tiff', 'tif',
+    'jfif', 'pjpeg', 'pjp', 'svg', 'ico', 'heic', 'heif'
+}
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -109,36 +116,90 @@ print("✅ PaddleOCR đã sẵn sàng với config tối ưu!")
 
 def allowed_file(filename):
     """Check if file extension is allowed"""
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    if not filename or '.' not in filename:
+        return False
+    ext = filename.rsplit('.', 1)[1].lower()
+    return ext in ALLOWED_EXTENSIONS
+
+def is_pdf_file(filename, file_buffer):
+    """Check if file is PDF by content, not just extension"""
+    try:
+        # Check extension first
+        if filename and filename.lower().endswith('.pdf'):
+            return True
+        
+        # Check magic bytes (PDF starts with %PDF)
+        file_buffer.seek(0)
+        header = file_buffer.read(4)
+        file_buffer.seek(0)
+        return header.startswith(b'%PDF')
+    except:
+        return False
+
+def is_image_file(filename, file_buffer):
+    """Check if file is image by trying to open with PIL"""
+    try:
+        # Check extension first
+        if filename:
+            ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
+            image_exts = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'tiff', 'tif', 'jfif', 'pjpeg', 'pjp', 'ico', 'heic', 'heif'}
+            if ext in image_exts:
+                # Try to open with PIL to verify
+                file_buffer.seek(0)
+                img = Image.open(io.BytesIO(file_buffer.read()))
+                img.verify()  # Verify it's a valid image
+                file_buffer.seek(0)
+                return True
+        return False
+    except:
+        return False
 
 def preprocess_image_for_ocr(image):
     """
     Preprocess image để tối ưu OCR cho tiếng Việt - KHÔNG LÀM MẤT CHỮ
     Preprocessing nhẹ để không làm mất thông tin text
     """
-    # Convert PIL to OpenCV format
-    img_array = np.array(image)
-    
-    # GIỮ NGUYÊN ảnh gốc nếu đã tốt - không preprocessing quá mạnh
-    # Vì preprocessing có thể làm mất chữ hoặc làm sai text
-    
-    # Chỉ enhance contrast nhẹ nếu cần
-    if len(img_array.shape) == 3:
-        # Giữ color - không convert sang grayscale (có thể mất thông tin)
-        img_processed = img_array.copy()
-        # Enhance contrast nhẹ
-        img_processed = cv2.convertScaleAbs(img_processed, alpha=1.2, beta=5)
-    else:
-        # Grayscale - enhance nhẹ
-        img_processed = cv2.convertScaleAbs(img_array, alpha=1.3, beta=5)
-    
-    # Convert back to PIL
-    if len(img_processed.shape) == 2:
-        return Image.fromarray(img_processed, mode='L')
-    elif len(img_processed.shape) == 3:
-        return Image.fromarray(cv2.cvtColor(img_processed, cv2.COLOR_BGR2RGB))
-    else:
-        return image  # Return original nếu có vấn đề
+    try:
+        # Đảm bảo image là RGB mode
+        if image.mode != 'RGB':
+            if image.mode == 'RGBA':
+                # Tạo background trắng cho RGBA
+                rgb_image = Image.new('RGB', image.size, (255, 255, 255))
+                rgb_image.paste(image, mask=image.split()[3] if image.mode == 'RGBA' else None)
+                image = rgb_image
+            else:
+                image = image.convert('RGB')
+        
+        # Convert PIL to OpenCV format
+        img_array = np.array(image)
+        
+        # Đảm bảo là uint8
+        if img_array.dtype != np.uint8:
+            img_array = img_array.astype(np.uint8)
+        
+        # GIỮ NGUYÊN ảnh gốc nếu đã tốt - không preprocessing quá mạnh
+        # Vì preprocessing có thể làm mất chữ hoặc làm sai text
+        
+        # Chỉ enhance contrast nhẹ nếu cần
+        if len(img_array.shape) == 3:
+            # Giữ color - không convert sang grayscale (có thể mất thông tin)
+            img_processed = img_array.copy()
+            # Enhance contrast nhẹ
+            img_processed = cv2.convertScaleAbs(img_processed, alpha=1.2, beta=5)
+        else:
+            # Grayscale - enhance nhẹ
+            img_processed = cv2.convertScaleAbs(img_array, alpha=1.3, beta=5)
+        
+        # Convert back to PIL
+        if len(img_processed.shape) == 2:
+            return Image.fromarray(img_processed, mode='L')
+        elif len(img_processed.shape) == 3:
+            return Image.fromarray(cv2.cvtColor(img_processed, cv2.COLOR_BGR2RGB))
+        else:
+            return image  # Return original nếu có vấn đề
+    except Exception as e:
+        print(f"⚠️  Lỗi khi preprocess image: {str(e)}, giữ nguyên image gốc")
+        return image  # Return original nếu có lỗi
 
 def extract_text_from_pdf(file_buffer):
     """
@@ -368,16 +429,36 @@ def ocr_image(image, use_preprocessing=False):
             image = preprocess_image_for_ocr(image)
         
         # Convert PIL to numpy array for PaddleOCR
+        # Đảm bảo image là RGB mode trước
+        if image.mode != 'RGB':
+            if image.mode == 'RGBA':
+                # Tạo background trắng cho RGBA
+                rgb_image = Image.new('RGB', image.size, (255, 255, 255))
+                rgb_image.paste(image, mask=image.split()[3] if image.mode == 'RGBA' else None)
+                image = rgb_image
+            else:
+                image = image.convert('RGB')
+        
         img_array = np.array(image)
         
-        # PaddleOCR expects BGR format for OpenCV
-        if len(img_array.shape) == 3:
-            if img_array.shape[2] == 4:  # RGBA
+        # Đảm bảo img_array có format đúng
+        if len(img_array.shape) == 2:
+            # Grayscale -> convert to BGR
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+        elif len(img_array.shape) == 3:
+            # Color image - PIL là RGB, PaddleOCR cần BGR
+            if img_array.shape[2] == 4:  # RGBA (should not happen after conversion above)
                 img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
             elif img_array.shape[2] == 3:  # RGB
                 img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-        else:  # Grayscale
-            img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+            else:
+                raise Exception(f"Unsupported image format: {img_array.shape}")
+        else:
+            raise Exception(f"Invalid image array shape: {img_array.shape}")
+        
+        # Đảm bảo img_array là uint8
+        if img_array.dtype != np.uint8:
+            img_array = img_array.astype(np.uint8)
         
         # Perform OCR - ĐẢM BẢO KHÔNG MẤT CHỮ
         result = ocr_engine.ocr(img_array, cls=True)
@@ -666,8 +747,15 @@ def process_image(file_buffer, use_text_correction=True):
     start_time = time.time()
     
     try:
-        # Open image
-        image = Image.open(io.BytesIO(file_buffer))
+        # Open image - PIL sẽ tự động handle nhiều format (PNG, JPG, GIF, BMP, WEBP, TIFF, etc.)
+        try:
+            image = Image.open(io.BytesIO(file_buffer))
+            # Verify image is valid
+            image.verify()
+            # Reopen because verify() closes the image
+            image = Image.open(io.BytesIO(file_buffer))
+        except Exception as img_error:
+            raise Exception(f"Không thể mở file ảnh: {str(img_error)}. Vui lòng đảm bảo file là ảnh hợp lệ (PNG, JPG, JPEG, GIF, BMP, WEBP, TIFF, etc.)")
         
         # OCR
         result = ocr_image(image, use_preprocessing=False)  # TẮT preprocessing để không mất chữ
@@ -777,29 +865,36 @@ def extract_text():
                 'message': f'File quá lớn. Kích thước tối đa: {MAX_FILE_SIZE / 1024 / 1024}MB'
             }), 400
         
-        # Check file type
-        if not allowed_file(file.filename):
-            return jsonify({
-                'success': False,
-                'message': 'File type không được hỗ trợ'
-            }), 400
-        
-        # Read file to buffer
+        # Read file to buffer first (need to check content type)
         file_buffer = file.read()
+        file_buffer_io = io.BytesIO(file_buffer)
+        
+        # Check file type by content, not just extension (more flexible)
+        is_pdf = is_pdf_file(file.filename, file_buffer_io)
+        is_image = is_image_file(file.filename, file_buffer_io) if not is_pdf else False
+        
+        if not is_pdf and not is_image:
+            # Try extension check as fallback
+            if not allowed_file(file.filename):
+                return jsonify({
+                    'success': False,
+                    'message': f'File type không được hỗ trợ. Hỗ trợ: PDF và các định dạng ảnh (PNG, JPG, JPEG, GIF, BMP, WEBP, TIFF, etc.)'
+                }), 400
         
         # Get options
         force_ocr = request.form.get('forceOCR', 'false').lower() == 'true'
         use_text_correction = request.form.get('useTextCorrection', 'true').lower() == 'true'  # Default: enabled
         
-        # Determine file type
-        filename_lower = file.filename.lower()
-        
-        # Process based on file type
-        if filename_lower.endswith('.pdf') or file.content_type == 'application/pdf':
+        # Process based on detected file type (use content detection)
+        if is_pdf:
             result = process_pdf(file_buffer, force_ocr=force_ocr, use_text_correction=use_text_correction)
-        else:
-            # Image file
+        elif is_image:
             result = process_image(file_buffer, use_text_correction=use_text_correction)
+        else:
+            return jsonify({
+                'success': False,
+                'message': 'Không thể xác định loại file. Vui lòng upload file PDF hoặc ảnh hợp lệ.'
+            }), 400
         
         # Return result
         if result.get('success'):
